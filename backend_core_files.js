@@ -1,0 +1,402 @@
+// ============================================
+// FILE: backend/server.js
+// ============================================
+
+const app = require('./src/app');
+const connectDB = require('./src/config/database');
+require('dotenv').config();
+
+const PORT = process.env.PORT || 5000;
+
+// Connect to MongoDB
+connectDB();
+
+// Start server
+const server = app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📊 Environment: ${process.env.NODE_ENV}`);
+  console.log(`🔗 API URL: http://localhost:${PORT}/api`);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err, promise) => {
+  console.error('Unhandled Promise Rejection:', err.message);
+  server.close(() => {
+    process.exit(1);
+  });
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err.message);
+  process.exit(1);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Shutting down gracefully...');
+  server.close(() => {
+    console.log('Process terminated');
+  });
+});
+
+// ============================================
+// FILE: backend/src/app.js
+// ============================================
+
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+
+const errorHandler = require('./middleware/errorHandler');
+
+// Import routes
+const authRoutes = require('./routes/auth');
+const videoRoutes = require('./routes/videos');
+const commentRoutes = require('./routes/comments');
+const noteRoutes = require('./routes/notes');
+const logRoutes = require('./routes/logs');
+
+const app = express();
+
+// ============================================
+// MIDDLEWARE
+// ============================================
+
+// Security middleware
+app.use(helmet());
+
+// Compression middleware
+app.use(compression());
+
+// CORS configuration
+app.use(cors({
+  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use('/api', limiter);
+
+// Body parsing middleware
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Logging middleware
+if (process.env.NODE_ENV === 'development') {
+  app.use(morgan('dev'));
+} else {
+  app.use(morgan('combined'));
+}
+
+// ============================================
+// ROUTES
+// ============================================
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'OK',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV,
+    version: '1.0.0'
+  });
+});
+
+// API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/videos', videoRoutes);
+app.use('/api/comments', commentRoutes);
+app.use('/api/notes', noteRoutes);
+app.use('/api/logs', logRoutes);
+
+// Catch-all route for undefined routes
+app.all('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: `Route ${req.originalUrl} not found`,
+  });
+});
+
+// ============================================
+// ERROR HANDLING
+// ============================================
+
+// Global error handler
+app.use(errorHandler);
+
+module.exports = app;
+
+// ============================================
+// FILE: backend/src/config/database.js
+// ============================================
+
+const mongoose = require('mongoose');
+
+const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+
+    console.log(`🗄️  MongoDB Connected: ${conn.connection.host}`);
+    
+    // Log database name
+    console.log(`📊 Database: ${conn.connection.name}`);
+    
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error.message);
+    process.exit(1);
+  }
+};
+
+// Handle MongoDB connection events
+mongoose.connection.on('connected', () => {
+  console.log('✅ Mongoose connected to MongoDB');
+});
+
+mongoose.connection.on('error', (err) => {
+  console.error('❌ Mongoose connection error:', err);
+});
+
+mongoose.connection.on('disconnected', () => {
+  console.log('⚠️  Mongoose disconnected from MongoDB');
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  try {
+    await mongoose.connection.close();
+    console.log('🔒 MongoDB connection closed through app termination');
+    process.exit(0);
+  } catch (err) {
+    console.error('❌ Error closing MongoDB connection:', err);
+    process.exit(1);
+  }
+});
+
+module.exports = connectDB;
+
+// ============================================
+// FILE: backend/src/config/youtube.js
+// ============================================
+
+const { google } = require('googleapis');
+
+// OAuth2 client configuration
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  process.env.GOOGLE_REDIRECT_URI
+);
+
+// YouTube API configuration
+const youtube = google.youtube({
+  version: 'v3',
+  auth: oauth2Client
+});
+
+// OAuth scopes required for YouTube operations
+const SCOPES = [
+  'https://www.googleapis.com/auth/youtube',
+  'https://www.googleapis.com/auth/youtube.force-ssl',
+  'https://www.googleapis.com/auth/youtube.readonly',
+  'https://www.googleapis.com/auth/userinfo.profile',
+  'https://www.googleapis.com/auth/userinfo.email'
+];
+
+// YouTube API methods wrapper class
+class YouTubeService {
+  
+  // Set credentials for authenticated requests
+  static setCredentials(tokens) {
+    oauth2Client.setCredentials(tokens);
+  }
+
+  // Get video details by video ID
+  static async getVideoDetails(videoId) {
+    try {
+      const response = await youtube.videos.list({
+        part: ['snippet', 'statistics', 'status', 'contentDetails'],
+        id: [videoId]
+      });
+
+      if (response.data.items.length === 0) {
+        throw new Error('Video not found');
+      }
+
+      return response.data.items[0];
+    } catch (error) {
+      console.error('Error fetching video details:', error.message);
+      throw error;
+    }
+  }
+
+  // Update video details (title, description, tags)
+  static async updateVideo(videoId, updateData) {
+    try {
+      const { title, description, tags, categoryId } = updateData;
+      
+      const response = await youtube.videos.update({
+        part: ['snippet'],
+        requestBody: {
+          id: videoId,
+          snippet: {
+            title,
+            description,
+            tags: tags || [],
+            categoryId: categoryId || '22' // Default to People & Blogs
+          }
+        }
+      });
+
+      return response.data;
+    } catch (error) {
+      console.error('Error updating video:', error.message);
+      throw error;
+    }
+  }
+
+  // Get video comments
+  static async getVideoComments(videoId, maxResults = 20, pageToken = '') {
+    try {
+      const response = await youtube.commentThreads.list({
+        part: ['snippet', 'replies'],
+        videoId,
+        maxResults,
+        pageToken,
+        order: 'time'
+      });
+
+      return {
+        comments: response.data.items,
+        nextPageToken: response.data.nextPageToken,
+        totalResults: response.data.pageInfo.totalResults
+      };
+    } catch (error) {
+      console.error('Error fetching comments:', error.message);
+      throw error;
+    }
+  }
+
+  // Add comment to video
+  static async addComment(videoId, text) {
+    try {
+      const response = await youtube.commentThreads.insert({
+        part: ['snippet'],
+        requestBody: {
+          snippet: {
+            videoId,
+            topLevelComment: {
+              snippet: {
+                textOriginal: text
+              }
+            }
+          }
+        }
+      });
+
+      return response.data;
+    } catch (error) {
+      console.error('Error adding comment:', error.message);
+      throw error;
+    }
+  }
+
+  // Reply to comment
+  static async replyToComment(parentId, text) {
+    try {
+      const response = await youtube.comments.insert({
+        part: ['snippet'],
+        requestBody: {
+          snippet: {
+            parentId,
+            textOriginal: text
+          }
+        }
+      });
+
+      return response.data;
+    } catch (error) {
+      console.error('Error replying to comment:', error.message);
+      throw error;
+    }
+  }
+
+  // Delete comment
+  static async deleteComment(commentId) {
+    try {
+      await youtube.comments.delete({
+        id: commentId
+      });
+
+      return { success: true };
+    } catch (error) {
+      console.error('Error deleting comment:', error.message);
+      throw error;
+    }
+  }
+
+  // Get user's channel info
+  static async getChannelInfo() {
+    try {
+      const response = await youtube.channels.list({
+        part: ['snippet', 'statistics', 'contentDetails'],
+        mine: true
+      });
+
+      if (response.data.items.length === 0) {
+        throw new Error('Channel not found');
+      }
+
+      return response.data.items[0];
+    } catch (error) {
+      console.error('Error fetching channel info:', error.message);
+      throw error;
+    }
+  }
+
+  // Get user's videos
+  static async getUserVideos(channelId, maxResults = 25, pageToken = '') {
+    try {
+      const response = await youtube.search.list({
+        part: ['snippet'],
+        channelId,
+        type: 'video',
+        order: 'date',
+        maxResults,
+        pageToken
+      });
+
+      return {
+        videos: response.data.items,
+        nextPageToken: response.data.nextPageToken,
+        totalResults: response.data.pageInfo.totalResults
+      };
+    } catch (error) {
+      console.error('Error fetching user videos:', error.message);
+      throw error;
+    }
+  }
+}
+
+module.exports = {
+  oauth2Client,
+  youtube,
+  SCOPES,
+  YouTubeService
+};
