@@ -1,3 +1,7 @@
+Folder Structure
+
+
+
 youtube-companion-dashboard/
 ├── backend/
 │   ├── src/
